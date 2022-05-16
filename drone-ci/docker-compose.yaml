@@ -1,0 +1,107 @@
+version: "3.8"
+
+networks:
+  cicd:
+    external:
+      name: drone-cicd
+
+services:
+  db:
+    image: postgres:14-alpine
+    restart: unless-stopped
+    networks:
+      - cicd
+    environment:
+      POSTGRES_USER: drone
+      POSTGRES_PASSWORD: drone
+      POSTGRES_DB: drone
+    volumes:
+      - db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: pg_isready
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  app:
+    image: drone/drone:2
+    restart: unless-stopped
+    networks:
+      - cicd
+    depends_on:
+      - db
+    environment:
+      DRONE_GITEA_SERVER: <TO-BE-FILLED>
+      DRONE_GITEA_CLIENT_ID: <TO-BE-FILLED>
+      DRONE_GITEA_CLIENT_SECRET: <TO-BE-FILLED>
+      DRONE_RPC_SECRET: <TO-BE-FILLED>
+      DRONE_SERVER_HOST: <TO-BE-FILLED>
+      DRONE_SERVER_PROTO: <TO-BE-FILLED>
+      DRONE_USER_CREATE: username:<TO-BE-FILLED>,admin:true
+      DRONE_DATABASE_DRIVER: postgres
+      DRONE_DATABASE_DATASOURCE: postgres://drone:drone@postgres:5432/drone?sslmode=disable
+    ports:
+      - 3001:80
+    healthcheck:
+      test: wget -qO - http://localhost/healthz
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  docker-runner:
+    image: drone/drone-runner-docker:1
+    restart: unless-stopped
+    networks:
+      - cicd
+    depends_on:
+      - app
+    environment:
+      DRONE_RPC_PROTO: http
+      DRONE_RPC_HOST: app
+      DRONE_RPC_SECRET: <TO-BE-FILLED>
+      DRONE_RUNNER_CAPACITY: 5
+      DRONE_RUNNER_NAME: <TO-BE-FILLED>
+      DRONE_RUNNER_NETWORKS: drone-cicd  # we can only specify an "external" network here
+    ports:
+      - 3002:3000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  cache-storage:
+    image: minio/minio:latest
+    command: server /data
+    restart: unless-stopped
+    networks:
+      - cicd
+    depends_on:
+      - app
+    environment:
+      MINIO_ACCESS_KEY: minio_admin
+      MINIO_SECRET_KEY: minio_password
+      MINIO_SITE_REGION: ap-northeast-1
+    volumes:
+      - cache-storage-volume:/data
+    healthcheck:
+      test: curl -I http://localhost:9000/minio/health/live
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  cache-storage-init:
+    image: minio/mc:latest
+    networks:
+      - cicd
+    depends_on:
+      - cache-storage
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set drone-minio http://cache-storage:9000 minio_admin minio_password;
+      /usr/bin/mc mb --region=ap-northeast-1 drone-minio/cicd-cache;
+      /usr/bin/mc policy set public drone-minio/cicd-cache;
+      exit 0;
+      "
+
+volumes:
+  db-volume:
+  cache-storage-volume:
